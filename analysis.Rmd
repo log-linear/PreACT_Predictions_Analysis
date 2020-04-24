@@ -1,0 +1,163 @@
+---
+title: "Pre-ACT Predictions Analysis"
+author: "Victor Faner"
+output: html_document
+---
+
+```{r setup, include = F}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(RODBC)
+```
+
+## Context
+
+Pre-ACT score reports include predicted ranges for how scholars will likely
+perform on the actual ACT, broken down by both Composite and individual subject
+scores. Here we measure the accuracy of these predictions longitudinally by 
+examining historic performance on the unofficial Fall, Winter, and Official ACT 
+exams administered throughout the network.
+
+### Techincal Notes
+
+- For scholars who took the Pre-ACT more than once, the prediction intervals were
+taken from the _most recent_ administration.
+- For scholars who took the official ACT more than once, their scores were taken
+from their _first_ administration.
+- These analyses _only_ look at scholars who took all three administrations of
+the ACT (Unofficial Fall, Winter, and Official)
+
+
+```{r read_dataset, echo = F}
+setwd("S:\\Student Data\\Analysts\\Projects\\PreACT Predictions Analysis")
+
+channel <- odbcDriverConnect("driver={SQL Server};
+                              server=TLXSQLPROD-01;
+                              trusted_connection=true")
+query <- read_file("queries\\pull.sql")
+data <- sqlQuery(channel, query)
+
+close(channel)
+
+# Rearrange test_type and prediction_accuracy orders for better plotting
+data$test_type <- factor(data$test_type,
+                         levels = c("Unofficial Fall",
+                                    "Unofficial Winter",
+                                    "Official"))
+data$prediction_accuracy <- factor(data$prediction_accuracy, 
+                                   levels = c("Above Predicted Range", 
+                                              "Within Predicted Range", 
+                                              "Below Predicted Range"))
+
+# Print sample table to file
+data %>% 
+  filter(subject == "Composite") %>%
+  select(local_id, predicted_score_low, predicted_score_high, test_type, 
+         scale_score, prediction_accuracy) %>%
+  mutate(local_id = (local_id / (2^24) * 999999999) + 1) %>%  # Randomize IDs for priavcy reasons
+  sample_n(size = 9) %>%
+  kable() %>%
+  kable_styling("striped", full_width = F) 
+```
+
+## Accuracy Analysis
+
+What percentage of scholars scored below, within, or above their predicted range for 
+Official, Fall Unofficial, and Winter Unofficial?
+
+```{r accuracy_analysis, echo = F, fig.width = 12, fig.height = 8}
+# Calculate accuracy
+accuracy <- data %>% 
+  filter(n_administrations == 3) %>%  # Only include scholars with all 3 ACTs
+  group_by(test_type, subject) %>%
+  drop_na(prediction_accuracy) %>%  # Drop rows with no composite score
+  mutate(total_by_test = n()) %>%  # e.g. total number of Unofficial Fall tests
+  ungroup() %>%
+  
+  group_by(test_type, subject, total_by_test, prediction_accuracy) %>%
+  summarize(total_by_bucket_by_test = n()) %>%  # e.g. number of tests Within Predicted Range
+  mutate(pct = total_by_bucket_by_test / total_by_test) %>%
+  ungroup()
+
+# Generate stacked bar charts by test_type and subject
+accuracy %>% 
+  ggplot(., aes(fill = prediction_accuracy, x = subject, y = pct)) + 
+    geom_bar(position = "fill", 
+             stat = "identity") +
+    scale_y_continuous(labels = scales::percent) +
+    scale_fill_manual(values = alpha(c("green", "blue", "red"), .3)) +
+    geom_text(aes(label = scales::percent(pct %>% round(2))), 
+              position = position_stack(vjust = 0.5)) +
+    facet_grid(cols = vars(test_type))
+```
+
+## Residuals Analysis
+
+For the scholars who scored outside of their predicted range, how much better
+or worse did they do than the predicted upper or lower bounds, respectively?
+
+The data suggest that, while scholars generally perform 1-3 points
+below expectation at first, over time the score differential narrows and trends
+upwards significantly. By the time scholars take the Official ACT, score
+performance is well aligned with 10th grade PreACT predictions.
+
+```{r residuals_analysis, echo = F, fig.width = 12, fig.height = 8}
+# Calculate residuals across all prediction accuracy levels combined
+residuals <- data %>%
+  filter(n_administrations == 3) %>%
+  drop_na(prediction_accuracy) %>%
+  group_by(subject) %>%
+  summarize(mean = mean(residuals), standard_deviation = sd(residuals))
+
+# Calculate residuals just for Above/Below Predicted Range
+residuals_by_accuracy <- data %>%
+  filter(n_administrations == 3) %>%
+  drop_na(prediction_accuracy) %>%
+  group_by(test_type, prediction_accuracy) %>%
+  summarize(mean_by_accuracy = mean(residuals), 
+            standard_deviation_by_accuracy = sd(residuals))
+
+# Generate plots 
+data %>%
+  filter(n_administrations == 3) %>%
+  ggplot(., aes(x = subject, y = residuals)) +
+    geom_boxplot() +
+    stat_summary(fun.y = mean, geom = "text", 
+                 aes(label = round(..y.., digits = 1))) +
+    facet_grid(cols = vars(test_type))
+```
+
+## Conclusions
+
+In general, the accuracy of the Pre-ACT prediction intervals appears to improve
+over time. Among other factors, this may be due to practice effects: scholars 
+taking the ACT/Pre-ACT multiple times may perform better simply due to 
+repeated exposure to the same types of questions. Alternatively, since the 
+PreACT and ACT are aligned with presumed 10th grade and 11th grade proficiency
+levels, scholars may not have the requisite skills to perform at expectation
+until they take the official ACT assessment at the end of 11th grade.
+
+Looking at the Unofficial Fall ACTs, the majority of scholars tend to score
+below the Pre-ACT's predictions across all subjects, but moving into Unofficial
+Winter and Official Fall ACTs, scores are generally improving. According to
+these results, 71% of scholars score within or above their predicted Composite 
+score range on Unofficial Winter ACTs. While we see only a 1% increase in 
+overall Composite score accuracy on the official ACT, we see a larger proportion
+of scholars scoring Above Predicted Range at 15%, vs. 11% on Unofficial
+Winter ACT.
+
+One interesting trend to note is that while scholars tend to score within or
+above their predicted ranges on Composite, English, and Math Unofficial Winter
+ACTs, a slightly higher percentage (54% and 44%, respectively) of Reading and 
+Science scores are Below Predicted Range. This trend appears to drop off by the
+time scholars take the official ACT, but the results still indicate higher
+porportions of under-predictions for these two subjects than any of the others.
+
+Overall, the data suggests that while the PreACT predictions may accurately 
+reflect performance on the actual ACT, they may not be suitable goals for 
+scholars while they are still gaining proficiency on unofficial benchmarks. For
+goal-setting purposes, expected performance on unofficial ACTs may need to be
+realigned to compensate for any interim deficiencies.
